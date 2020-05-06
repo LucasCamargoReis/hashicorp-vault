@@ -1,0 +1,239 @@
+#######################################
+#  INSTALL VAULT WITH CONSUL BACKEND  #
+#######################################
+https://learn.hashicorp.com/consul/datacenter-deploy/deployment-guide
+https://learn.hashicorp.com/vault/operations/ops-deployment-guide
+
+1 - Install Vault
+
+export VAULT_URL="https://releases.hashicorp.com/vault" 
+export VAULT_VERSION="1.3.5"
+
+curl --silent --remote-name "${VAULT_URL}/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+
+curl --silent --remote-name "${VAULT_URL}/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS"
+
+curl --silent --remote-name "${VAULT_URL}/${VAULT_VERSION}/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS.sig"
+
+unzip vault_${VAULT_VERSION}_linux_amd64.zip
+sudo chown root:root vault
+sudo mv vault /usr/local/bin/
+vault --version
+
+vault -autocomplete-install
+complete -C /usr/local/bin/vault vault
+
+sudo setcap cap_ipc_lock=+ep /usr/local/bin/vault
+
+sudo useradd --system --home /etc/vault.d --shell /bin/false vault
+
+sudo touch /etc/systemd/system/vault.service
+
+[Unit]
+Description="HashiCorp Vault - A tool for managing secrets"
+Documentation=https://www.vaultproject.io/docs/
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/vault.d/vault.hcl
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+User=vault
+Group=vault
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+SecureBits=keep-caps
+AmbientCapabilities=CAP_IPC_LOCK
+Capabilities=CAP_IPC_LOCK+ep
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+NoNewPrivileges=yes
+ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StartLimitInterval=60
+StartLimitIntervalSec=60
+StartLimitBurst=3
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
+
+2 - Install Consul 
+
+export CONSUL_VERSION="1.6.5"
+curl --silent --remote-name https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip
+curl --silent --remote-name https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_SHA256SUMS
+curl --silent --remote-name https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_SHA256SUMS.sig
+
+unzip consul_${CONSUL_VERSION}_linux_amd64.zip
+sudo chown root:root consul
+sudo mv consul /usr/local/bin/
+consul --version
+
+consul -autocomplete-install
+complete -C /usr/local/bin/consul consul
+
+sudo useradd --system --home /etc/consul.d --shell /bin/false consul
+sudo mkdir --parents /opt/consul
+sudo chown --recursive consul:consul /opt/consul
+
+sudo touch /etc/systemd/system/consul.service
+
+[Unit]
+Description="HashiCorp Consul - A service mesh solution"
+Documentation=https://www.consul.io/
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/consul.d/consul.hcl
+
+[Service]
+Type=notify
+User=consul
+Group=consul
+ExecStart=/usr/local/bin/consul agent -config-dir=/etc/consul.d/
+ExecReload=/usr/local/bin/consul reload
+KillMode=process
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+
+sudo mkdir --parents /etc/consul.d
+sudo touch /etc/consul.d/consul.hcl
+sudo chown --recursive consul:consul /etc/consul.d
+sudo chmod 640 /etc/consul.d/consul.hcl
+vim /etc/consul.d/consul.hcl
+
+datacenter = "dc1"
+data_dir = "/opt/consul"
+encrypt = "Luj2FZWwlt8475wD1WtwUQ=="
+retry_join = ["192.168.1.4"]
+
+sudo mkdir --parents /etc/consul.d
+sudo touch /etc/consul.d/server.hcl
+sudo chown --recursive consul:consul /etc/consul.d
+sudo chmod 640 /etc/consul.d/server.hcl
+vim /etc/consul.d/server.hcl
+
+server = true
+bootstrap_expect = 1
+ui = true
+
+sudo systemctl enable consul
+sudo systemctl start consul
+sudo systemctl status consul
+
+
+3 - Configure Consul ACL
+
+touch /etc/consul.d/acl.hcl
+vim /etc/consul.d/acl.hcl
+
+acl {
+ enabled = true
+ default_policy = "deny"
+ enable_token_persistence = true
+}
+
+sudo systemctl restart consul
+
+consul acl bootstrap
+SecretID:         958a4198-e199-5e87-c295-6b8172d4b280
+
+export CONSUL_MGMT_TOKEN="958a4198-e199-5e87-c295-6b8172d4b280"
+
+touch /etc/consul.d/node-policy.hcl
+vim /etc/consul.d/node-policy.hcl
+
+agent_prefix "" {
+ policy = "write"
+}
+node_prefix "" {
+ policy = "write"
+}
+service_prefix "" {
+ policy = "read"
+}
+session_prefix "" {
+ policy = "read"
+}
+
+consul acl policy create -token=${CONSUL_MGMT_TOKEN} -name node-policy -rules @node-policy.hcl
+
+consul acl token create -token=${CONSUL_MGMT_TOKEN} -description "node token" -policy-name node-policy
+
+consul acl set-agent-token -token=${CONSUL_MGMT_TOKEN} agent "d1f796a3-21fe-ca7d-6449-db71b072ea48"
+
+
+touch /etc/consul.d/vault-policy.hcl
+vim /etc/consul.d/vault-policy.hcl
+
+key_prefix "vault/" {
+ policy = "write"
+}
+node_prefix "" {
+ policy = "write"
+}
+service "vault" {
+ policy = "write"
+}
+agent_prefix "" {
+ policy = "write"
+}
+session_prefix "" {
+ policy = "write"
+}
+
+consul acl policy create -token=${CONSUL_MGMT_TOKEN} -name vault-policy -rules @vault-policy.hcl
+09342b6f-4f8f-98a1-a4f4-2e94ccaac432 
+
+consul acl token create -token=${CONSUL_MGMT_TOKEN} -description "Token for Vault Service" -policy-name vault-policy
+3bfd01c6-ee54-b725-e874-85819388e6ae
+
+4 - Configure vault
+
+sudo mkdir --parents /etc/vault.d
+sudo touch /etc/vault.d/vault.hcl
+sudo chown --recursive vault:vault /etc/vault.d
+sudo chmod 640 /etc/vault.d/vault.hcl
+vim /etc/vault.d/vault.hcl
+
+ui = true
+listener "tcp" {
+  address       = "127.0.0.1:8200"
+  tls_disable = 1
+}
+listener "tcp" {
+  address = "192.168.1.4:8200"
+  tls_disable = 1
+}
+storage "consul" {
+  address = "127.0.0.1:8500"
+  path = "vault/"
+  token = "3bfd01c6-ee54-b725-e874-85819388e6ae"
+}
+api_addr = "https://192.168.1.4:8200"
+cluster_addr = "https://192.168.1.4:8201"
+log_level = "Debug"
+
+
+sudo systemctl enable vault
+sudo systemctl start vault
+sudo systemctl status vault
+
+rootkey: s.l6V62GGcvuMeuQhBDtFOl4ey
+key1: vH4pjt8EJMgrOuBMVUF+oXL5oQ2r5LbQ1dyjjHkh/tUZ
+key2: 5cl+dcaJuzuaIegsiOSw5Zu6BwwymmGrYDzF90+3EFrU
+key3: QtuEzyXlYw9vrJqu6pgAFdNtvJXYqRkM+VZS9uOB+px1
+key4: VvvycxLH+f9b3Sdtjoz6GpqSdDHnUClwAfqO68Ru42nh
+key5: JvrXr5WrztVc4h6vRydsTaRxl/s0o6MAQLh+oo0Le1/I
+
